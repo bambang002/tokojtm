@@ -38,7 +38,10 @@ ALGORITHM = "HS256"
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# Models
+# ==========================================
+# MODELS
+# ==========================================
+
 class UserRegister(BaseModel):
     nama: str
     email: EmailStr
@@ -112,7 +115,18 @@ class Debt(BaseModel):
     cicilan: List[dict] = []
     tanggal_hutang: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-# Auth functions
+class Customer(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    nama_pelanggan: str
+    nomor_telepon: Optional[str] = None
+    alamat: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ==========================================
+# AUTH FUNCTIONS
+# ==========================================
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -141,7 +155,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# Auth endpoints
+
+# ==========================================
+# AUTH ENDPOINTS
+# ==========================================
 @api_router.post("/auth/register")
 async def register(user: UserRegister):
     existing = await db.users.find_one({"email": user.email})
@@ -181,7 +198,10 @@ async def login(credentials: UserLogin):
 async def get_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
-# Products endpoints
+
+# ==========================================
+# PRODUCTS ENDPOINTS
+# ==========================================
 @api_router.post("/products", response_model=Product)
 async def create_product(product: ProductCreate, current_user: dict = Depends(get_current_user)):
     product_obj = Product(**product.model_dump())
@@ -262,7 +282,45 @@ async def import_products(file: UploadFile = File(...), current_user: dict = Dep
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error importing file: {str(e)}")
 
-# Transactions endpoints
+
+# ==========================================
+# CUSTOMERS ENDPOINTS (DENGAN AUTO-SYNC)
+# ==========================================
+@api_router.get("/customers", response_model=List[Customer])
+async def get_customers(current_user: dict = Depends(get_current_user)):
+    # 1. Ambil daftar pelanggan yang sudah ada di tabel 'customers'
+    existing_customers = await db.customers.find({}).to_list(1000)
+    existing_names = [c["nama_pelanggan"].lower() for c in existing_customers if c.get("nama_pelanggan")]
+    
+    # 2. SINKRONISASI OTOMATIS: Cari nama dari tabel 'debts' (Hutang Lama)
+    old_debts = await db.debts.find({}, {"nama_pelanggan": 1}).to_list(10000)
+    
+    for debt in old_debts:
+        nama = debt.get("nama_pelanggan")
+        # Jika ada nama pelanggan lama yang BELUM ADA di tabel customers yang baru
+        if nama and isinstance(nama, str) and nama.strip():
+            if nama.strip().lower() not in existing_names:
+                new_cust = Customer(nama_pelanggan=nama.strip())
+                doc = new_cust.model_dump()
+                doc['created_at'] = doc['created_at'].isoformat()
+                
+                # Masukkan nama tersebut ke tabel customers
+                await db.customers.insert_one(doc)
+                existing_names.append(nama.strip().lower()) # Tandai agar tidak di-input dua kali
+            
+    # 3. Tarik ulang data pelanggan yang sudah lengkap & diurutkan sesuai abjad
+    final_customers = await db.customers.find({}, {"_id": 0}).sort("nama_pelanggan", 1).to_list(1000)
+    
+    for customer in final_customers:
+        if isinstance(customer['created_at'], str):
+            customer['created_at'] = datetime.fromisoformat(customer['created_at'])
+            
+    return final_customers
+
+
+# ==========================================
+# TRANSACTIONS ENDPOINTS
+# ==========================================
 @api_router.post("/transactions", response_model=Transaction)
 async def create_transaction(transaction: TransactionCreate, current_user: dict = Depends(get_current_user)):
     # Update stock
@@ -279,7 +337,20 @@ async def create_transaction(transaction: TransactionCreate, current_user: dict 
             {"id": item.product_id},
             {"$set": {"jumlah_barang": new_stock}}
         )
-    
+
+    # Simpan pelanggan baru jika belum ada
+    if transaction.nama_pelanggan and transaction.nama_pelanggan.strip():
+        nama_p = transaction.nama_pelanggan.strip()
+        existing_customer = await db.customers.find_one({
+            "nama_pelanggan": {"$regex": f"^{nama_p}$", "$options": "i"}
+        })
+        
+        if not existing_customer:
+            new_customer = Customer(nama_pelanggan=nama_p)
+            customer_doc = new_customer.model_dump()
+            customer_doc['created_at'] = customer_doc['created_at'].isoformat()
+            await db.customers.insert_one(customer_doc)
+
     transaction_obj = Transaction(**transaction.model_dump())
     doc = transaction_obj.model_dump()
     doc['tanggal'] = doc['tanggal'].isoformat()
@@ -287,9 +358,12 @@ async def create_transaction(transaction: TransactionCreate, current_user: dict 
     
     # Create debt if payment type is "hutang"
     if transaction.jenis_pembayaran == "hutang":
+        if not transaction.nama_pelanggan:
+            raise HTTPException(status_code=400, detail="Nama pelanggan wajib diisi untuk transaksi hutang")
+            
         debt_obj = Debt(
             transaction_id=transaction_obj.id,
-            nama_pelanggan=transaction.nama_pelanggan,
+            nama_pelanggan=transaction.nama_pelanggan.strip(),
             total_hutang=transaction.total,
             sisa_hutang=transaction.total
         )
@@ -337,23 +411,23 @@ async def get_today_transactions(current_user: dict = Depends(get_current_user))
 
 @api_router.delete("/transactions/{transaction_id}")
 async def delete_transaction(transaction_id: str, current_user: dict = Depends(get_current_user)):
-    # Check if transaction exists
     transaction = await db.transactions.find_one({"id": transaction_id})
     if not transaction:
         raise HTTPException(status_code=404, detail="Transaction not found")
     
-    # Delete transaction
     result = await db.transactions.delete_one({"id": transaction_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Failed to delete transaction")
     
-    # If transaction was hutang, also delete the debt record
     if transaction.get('jenis_pembayaran') == 'hutang':
         await db.debts.delete_one({"transaction_id": transaction_id})
     
     return {"message": "Transaction deleted successfully"}
 
-# Debts endpoints
+
+# ==========================================
+# DEBTS ENDPOINTS
+# ==========================================
 @api_router.get("/debts", response_model=List[Debt])
 async def get_debts(current_user: dict = Depends(get_current_user)):
     debts = await db.debts.find({}, {"_id": 0}).sort("tanggal_hutang", -1).to_list(1000)
@@ -407,40 +481,35 @@ async def pay_debt(debt_id: str, payment: DebtPayment, current_user: dict = Depe
 
 @api_router.delete("/debts/{debt_id}")
 async def delete_debt(debt_id: str, current_user: dict = Depends(get_current_user)):
-    # Check if debt exists
     debt = await db.debts.find_one({"id": debt_id})
     if not debt:
         raise HTTPException(status_code=404, detail="Debt not found")
     
-    # Delete debt
     result = await db.debts.delete_one({"id": debt_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Failed to delete debt")
     
     return {"message": "Debt deleted successfully"}
 
-# Reports endpoints
+
+# ==========================================
+# REPORTS ENDPOINTS
+# ==========================================
 @api_router.get("/reports/financial")
 async def get_financial_report(period: str, start_date: str = None, end_date: str = None, current_user: dict = Depends(get_current_user)):
-    """
-    Get financial report based on period: daily, weekly, monthly, yearly
-    """
     from datetime import datetime, timezone, timedelta
     
     now = datetime.now(timezone.utc)
     
-    # Determine date range based on period
     if period == "daily":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
     elif period == "weekly":
-        # Start from Monday of current week
         start = now - timedelta(days=now.weekday())
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=7)
     elif period == "monthly":
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        # Next month
         if now.month == 12:
             end = start.replace(year=now.year + 1, month=1)
         else:
@@ -454,7 +523,6 @@ async def get_financial_report(period: str, start_date: str = None, end_date: st
     else:
         raise HTTPException(status_code=400, detail="Invalid period or missing dates")
     
-    # Get transactions in date range
     transactions = await db.transactions.find({}, {"_id": 0}).to_list(10000)
     
     filtered_transactions = []
@@ -470,10 +538,8 @@ async def get_financial_report(period: str, start_date: str = None, end_date: st
             filtered_transactions.append(trans)
             total_revenue += trans['total']
             
-            # Calculate profit (assuming we can get cost from products)
             profit = 0
             for item in trans['items']:
-                # Get product to calculate profit
                 product = await db.products.find_one({"id": item['product_id']})
                 if product:
                     item_profit = (item['harga_jual'] - product['harga_beli']) * item['jumlah']
@@ -488,7 +554,6 @@ async def get_financial_report(period: str, start_date: str = None, end_date: st
                 total_hutang += trans['total']
                 payment_summary['hutang'] += 1
     
-    # Get debts summary
     debts = await db.debts.find({}, {"_id": 0}).to_list(10000)
     debts_unpaid = sum(d['sisa_hutang'] for d in debts if d['status'] == 'belum_lunas')
     debts_paid = sum(d['dibayar'] for d in debts if d['status'] == 'lunas')
@@ -510,7 +575,10 @@ async def get_financial_report(period: str, start_date: str = None, end_date: st
         "transactions": filtered_transactions
     }
 
-# Export endpoints
+
+# ==========================================
+# EXPORT ENDPOINTS
+# ==========================================
 @api_router.get("/export/transactions/excel")
 async def export_transactions_excel(current_user: dict = Depends(get_current_user)):
     transactions = await db.transactions.find({}, {"_id": 0}).to_list(10000)
@@ -553,7 +621,7 @@ async def export_transactions_pdf(current_user: dict = Depends(get_current_user)
     elements.append(Spacer(1, 20))
     
     data = [["Tanggal", "Items", "Total", "Pembayaran", "Pelanggan"]]
-    for trans in transactions[:50]:  # Limit to 50 for PDF
+    for trans in transactions[:50]:
         items_str = ", ".join([f"{item['nama_barang']}" for item in trans['items'][:2]])
         data.append([
             trans['tanggal'][:10] if isinstance(trans['tanggal'], str) else str(trans['tanggal'])[:10],
