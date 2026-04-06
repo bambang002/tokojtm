@@ -6,15 +6,35 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Check, ChevronsUpDown } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { toast } from 'sonner';
 import Swal from 'sweetalert2';
 
 const BACKEND_URL = "http://localhost:8001";
 
+// Axios Interceptor untuk otomatis handle token expired (401 Unauthorized)
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default function TransactionsPage() {
   const [products, setProducts] = useState([]);
   const [filteredProducts, setFilteredProducts] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [customers, setCustomers] = useState([]);
   const [cart, setCart] = useState([]);
   const [jenisPembayaran, setJenisPembayaran] = useState('lunas');
   const [namaPelanggan, setNamaPelanggan] = useState('');
@@ -25,14 +45,15 @@ export default function TransactionsPage() {
   const [currentReceipt, setCurrentReceipt] = useState(null);
   const [showDetailDialog, setShowDetailDialog] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
+  const [openCustomerList, setOpenCustomerList] = useState(false);
 
   useEffect(() => {
     fetchProducts();
     fetchTransactions();
+    fetchCustomers();
   }, []);
 
   useEffect(() => {
-    // Filter products based on search query
     if (searchQuery.trim() === '') {
       setFilteredProducts(products);
     } else {
@@ -67,6 +88,18 @@ export default function TransactionsPage() {
       setTransactions(response.data);
     } catch (error) {
       toast.error('Gagal memuat transaksi');
+    }
+  };
+
+  const fetchCustomers = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.get(`${BACKEND_URL}/api/customers`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setCustomers(response.data);
+    } catch (error) {
+      console.error('Gagal memuat pelanggan');
     }
   };
 
@@ -152,7 +185,6 @@ export default function TransactionsPage() {
 
       toast.success('Transaksi berhasil!');
       
-      // Prepare receipt data
       setCurrentReceipt({
         ...response.data,
         items: cart,
@@ -162,7 +194,6 @@ export default function TransactionsPage() {
         tanggal: new Date().toISOString()
       });
       
-      // Reset form and show receipt
       setCart([]);
       setJenisPembayaran('lunas');
       setNamaPelanggan('');
@@ -172,6 +203,7 @@ export default function TransactionsPage() {
       
       fetchProducts();
       fetchTransactions();
+      fetchCustomers();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Transaksi gagal');
     }
@@ -303,7 +335,6 @@ export default function TransactionsPage() {
         </Button>
       </div>
 
-      {/* Transaction Form Dialog */}
       <Dialog open={showForm} onOpenChange={setShowForm}>
         <DialogContent className="sm:max-w-[900px] max-h-[90vh] overflow-y-auto bg-white rounded-2xl">
           <DialogHeader>
@@ -311,11 +342,8 @@ export default function TransactionsPage() {
           </DialogHeader>
           
           <div className="grid grid-cols-2 gap-6 mt-4">
-            {/* Product List with Search */}
             <div>
               <h3 className="font-semibold text-lg mb-3">Pilih Produk</h3>
-              
-              {/* Search Box */}
               <div className="mb-4">
                 <Input
                   type="text"
@@ -351,7 +379,6 @@ export default function TransactionsPage() {
               </div>
             </div>
 
-            {/* Cart */}
             <div>
               <h3 className="font-semibold text-lg mb-3">Keranjang</h3>
               <div className="space-y-3 mb-4 max-h-[300px] overflow-y-auto">
@@ -410,15 +437,64 @@ export default function TransactionsPage() {
                 </div>
 
                 {jenisPembayaran === 'hutang' && (
-                  <div>
+                  <div className="flex flex-col space-y-2">
                     <Label>Nama Pelanggan</Label>
-                    <Input
-                      value={namaPelanggan}
-                      onChange={(e) => setNamaPelanggan(e.target.value)}
-                      data-testid="customer-name-input"
-                      placeholder="Masukkan nama pelanggan"
-                      className="mt-1.5"
-                    />
+                    <Popover open={openCustomerList} onOpenChange={setOpenCustomerList}>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          role="combobox"
+                          aria-expanded={openCustomerList}
+                          className="w-full justify-between mt-1.5"
+                        >
+                          {namaPelanggan ? namaPelanggan : "Pilih atau cari pelanggan..."}
+                          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[400px] p-0">
+                        <Command>
+                          <CommandInput 
+                            placeholder="Cari nama pelanggan..." 
+                            onValueChange={(val) => setNamaPelanggan(val)} 
+                          />
+                          <CommandList>
+                            <CommandEmpty>
+                              <div className="p-4 text-sm text-center">
+                                <p className="text-gray-500">Pelanggan tidak ditemukan.</p>
+                                <Button 
+                                  size="sm" 
+                                  variant="ghost" 
+                                  className="mt-2 text-emerald-600 w-full"
+                                  onClick={() => setOpenCustomerList(false)}
+                                >
+                                  Gunakan "{namaPelanggan}" sebagai pelanggan baru
+                                </Button>
+                              </div>
+                            </CommandEmpty>
+                            <CommandGroup heading="Pelanggan Terdaftar">
+                              {customers.map((customer) => (
+                                <CommandItem
+                                  key={customer.id}
+                                  value={customer.nama_pelanggan}
+                                  onSelect={(currentValue) => {
+                                    setNamaPelanggan(currentValue);
+                                    setOpenCustomerList(false);
+                                  }}
+                                >
+                                  <Check
+                                    className={cn(
+                                      "mr-2 h-4 w-4",
+                                      namaPelanggan === customer.nama_pelanggan ? "opacity-100" : "opacity-0"
+                                    )}
+                                  />
+                                  {customer.nama_pelanggan}
+                                </CommandItem>
+                              ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 )}
 
@@ -435,7 +511,6 @@ export default function TransactionsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Receipt Dialog */}
       <Dialog open={showReceipt} onOpenChange={setShowReceipt}>
         <DialogContent className="sm:max-w-[600px] bg-white rounded-2xl">
           <DialogHeader>
@@ -458,11 +533,7 @@ export default function TransactionsPage() {
                   <span className="text-gray-600">Tanggal:</span>
                   <span className="font-medium">
                     {new Date(currentReceipt.tanggal).toLocaleDateString('id-ID', {
-                      day: '2-digit',
-                      month: 'long',
-                      year: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit'
+                      day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit'
                     })}
                   </span>
                 </div>
@@ -516,32 +587,19 @@ export default function TransactionsPage() {
           )}
 
           <div className="flex gap-3 mt-4">
-            <Button
-              onClick={handlePrintReceipt}
-              data-testid="print-receipt-button"
-              className="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl"
-            >
+            <Button onClick={handlePrintReceipt} className="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl">
               Cetak Nota
             </Button>
-            <Button
-              onClick={handleSaveReceipt}
-              data-testid="save-receipt-button"
-              className="flex-1 bg-gradient-to-r from-emerald-500 to-green-500 text-white rounded-xl"
-            >
+            <Button onClick={handleSaveReceipt} className="flex-1 bg-gradient-to-r from-emerald-500 to-green-500 text-white rounded-xl">
               Simpan Nota
             </Button>
-            <Button
-              onClick={() => setShowReceipt(false)}
-              variant="outline"
-              className="flex-1 rounded-xl"
-            >
+            <Button onClick={() => setShowReceipt(false)} variant="outline" className="flex-1 rounded-xl">
               Tutup
             </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Transaction Detail Dialog */}
       <Dialog open={showDetailDialog} onOpenChange={setShowDetailDialog}>
         <DialogContent className="sm:max-w-[600px] bg-white rounded-2xl">
           <DialogHeader>
@@ -560,20 +618,14 @@ export default function TransactionsPage() {
                     <p className="text-gray-600">Tanggal:</p>
                     <p className="font-medium">
                       {new Date(selectedTransaction.tanggal).toLocaleDateString('id-ID', {
-                        day: '2-digit',
-                        month: 'short',
-                        year: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
+                        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
                       })}
                     </p>
                   </div>
                   <div>
                     <p className="text-gray-600">Jenis Pembayaran:</p>
                     <span className={`inline-block px-3 py-1 rounded-full text-xs font-medium ${
-                      selectedTransaction.jenis_pembayaran === 'lunas'
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-orange-100 text-orange-700'
+                      selectedTransaction.jenis_pembayaran === 'lunas' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'
                     }`}>
                       {selectedTransaction.jenis_pembayaran === 'lunas' ? 'Lunas' : 'Hutang'}
                     </span>
@@ -612,35 +664,21 @@ export default function TransactionsPage() {
           )}
 
           <div className="flex gap-3 mt-4">
-            <Button
-              onClick={() => setShowDetailDialog(false)}
-              className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 text-white rounded-xl"
-            >
+            <Button onClick={() => setShowDetailDialog(false)} className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 text-white rounded-xl">
               Tutup
             </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Transaction History */}
       <Card className="p-6 bg-white/80 backdrop-blur-sm border-emerald-100 shadow-lg">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-2xl font-bold text-gray-800">Riwayat Transaksi</h2>
           <div className="flex gap-3">
-            <Button
-              onClick={handleExportExcel}
-              data-testid="export-excel-button"
-              variant="outline"
-              className="border-emerald-400 text-emerald-600 hover:bg-emerald-50 rounded-xl"
-            >
+            <Button onClick={handleExportExcel} variant="outline" className="border-emerald-400 text-emerald-600 hover:bg-emerald-50 rounded-xl">
               Export Excel
             </Button>
-            <Button
-              onClick={handleExportPDF}
-              data-testid="export-pdf-button"
-              variant="outline"
-              className="border-cyan-400 text-cyan-600 hover:bg-cyan-50 rounded-xl"
-            >
+            <Button onClick={handleExportPDF} variant="outline" className="border-cyan-400 text-cyan-600 hover:bg-cyan-50 rounded-xl">
               Export PDF
             </Button>
           </div>
@@ -662,15 +700,11 @@ export default function TransactionsPage() {
               </thead>
               <tbody>
                 {transactions.map((trans, index) => (
-                  <tr key={trans.id} className="border-b border-gray-100 hover:bg-emerald-50 transition-colors" data-testid={`transaction-row-${index}`}>
+                  <tr key={trans.id} className="border-b border-gray-100 hover:bg-emerald-50 transition-colors">
                     <td className="py-4 px-6 text-gray-700 font-medium">{index + 1}</td>
                     <td className="py-4 px-6 text-gray-600">
                       {new Date(trans.tanggal).toLocaleDateString('id-ID', {
-                        day: '2-digit',
-                        month: 'short',
-                        year: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
+                        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
                       })}
                     </td>
                     <td className="py-4 px-6 text-gray-800">
@@ -682,34 +716,18 @@ export default function TransactionsPage() {
                     </td>
                     <td className="py-4 px-6">
                       <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        trans.jenis_pembayaran === 'lunas'
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-orange-100 text-orange-700'
+                        trans.jenis_pembayaran === 'lunas' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'
                       }`}>
                         {trans.jenis_pembayaran === 'lunas' ? 'Lunas' : 'Hutang'}
                       </span>
                     </td>
-                    <td className="py-4 px-6 text-gray-600">
-                      {trans.nama_pelanggan || '-'}
-                    </td>
+                    <td className="py-4 px-6 text-gray-600">{trans.nama_pelanggan || '-'}</td>
                     <td className="py-4 px-6">
                       <div className="flex gap-2">
-                        <Button
-                          onClick={() => viewTransactionDetail(trans)}
-                          data-testid={`view-detail-${index}`}
-                          size="sm"
-                          variant="outline"
-                          className="border-cyan-400 text-cyan-600 hover:bg-cyan-50 rounded-lg"
-                        >
+                        <Button onClick={() => viewTransactionDetail(trans)} size="sm" variant="outline" className="border-cyan-400 text-cyan-600 hover:bg-cyan-50 rounded-lg">
                           Detail
                         </Button>
-                        <Button
-                          onClick={() => handleDeleteTransaction(trans.id)}
-                          data-testid={`delete-transaction-${index}`}
-                          size="sm"
-                          variant="outline"
-                          className="border-red-400 text-red-600 hover:bg-red-50 rounded-lg"
-                        >
+                        <Button onClick={() => handleDeleteTransaction(trans.id)} size="sm" variant="outline" className="border-red-400 text-red-600 hover:bg-red-50 rounded-lg">
                           Hapus
                         </Button>
                       </div>
@@ -726,7 +744,7 @@ export default function TransactionsPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
             </div>
-            <p className="text-gray-500" data-testid="no-transactions-message">Belum ada transaksi</p>
+            <p className="text-gray-500">Belum ada transaksi</p>
           </div>
         )}
       </Card>
